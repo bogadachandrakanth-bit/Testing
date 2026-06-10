@@ -1,47 +1,43 @@
-const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
+const fs = require('fs');
 
-const dbPath = path.resolve(__dirname, 'database.db');
-const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY, (err) => {
-  if (err) {
-    console.error('Error opening database:', err.message);
-    process.exit(1);
-  }
-});
+const isVercel = process.env.VERCEL;
+const dbDir = isVercel ? '/tmp' : path.resolve(__dirname);
 
-db.serialize(() => {
-  console.log('--- NEXUSGATE RELATIONAL DATABASE METRICS ---\n');
+const paths = {
+  users: path.join(dbDir, 'users_table.json'),
+  login_counts: path.join(dbDir, 'login_counts_table.json'),
+  activity_logs: path.join(dbDir, 'activity_logs_table.json')
+};
 
-  // 1. Users Table
-  db.all("SELECT id, name, email, joined FROM users", [], (err, users) => {
-    if (err) {
-      console.error(err);
-      return;
+function readTable(tableName) {
+  try {
+    if (!fs.existsSync(paths[tableName])) {
+      return [];
     }
-    console.log(`[Table: users] Total records: ${users.length}`);
-    console.log(JSON.stringify(users, null, 2));
-    console.log('\n----------------------------------------\n');
-    
-    // 2. Login Counts Table
-    db.all("SELECT email, count FROM login_counts", [], (err, logins) => {
-      if (err) {
-        console.error(err);
-        return;
-      }
-      console.log(`[Table: login_counts] Total records: ${logins.length}`);
-      console.log(JSON.stringify(logins, null, 2));
-      console.log('\n----------------------------------------\n');
+    const data = fs.readFileSync(paths[tableName], 'utf8');
+    return JSON.parse(data || '[]');
+  } catch (e) {
+    console.error(`Error reading table ${tableName}:`, e);
+    return [];
+  }
+}
 
-      // 3. Activity Logs Table
-      db.all("SELECT id, email, action, status, ip, timestamp FROM activity_logs ORDER BY id DESC", [], (err, logs) => {
-        if (err) {
-          console.error(err);
-          return;
-        }
-        console.log(`[Table: activity_logs] Total records: ${logs.length}`);
-        console.log(JSON.stringify(logs, null, 2));
-        db.close();
-      });
-    });
-  });
-});
+console.log('--- NEXUSGATE RELATIONAL DATABASE METRICS ---\n');
+
+// 1. Users Table
+const users = readTable('users');
+console.log(`[Table: users] Total records: ${users.length}`);
+console.log(JSON.stringify(users.map(u => ({ id: u.id, name: u.name, email: u.email, joined: u.joined })), null, 2));
+console.log('\n----------------------------------------\n');
+
+// 2. Login Counts Table
+const logins = readTable('login_counts');
+console.log(`[Table: login_counts] Total records: ${logins.length}`);
+console.log(JSON.stringify(logins, null, 2));
+console.log('\n----------------------------------------\n');
+
+// 3. Activity Logs Table
+const logs = readTable('activity_logs');
+console.log(`[Table: activity_logs] Total records: ${logs.length}`);
+console.log(JSON.stringify(logs, null, 2));

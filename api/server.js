@@ -1,7 +1,7 @@
 const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
 const bcrypt = require('bcryptjs');
 const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const PORT = 3000;
@@ -11,76 +11,136 @@ app.use(express.json());
 
 // Database Path Configuration (Use writable /tmp folder on Vercel)
 const isVercel = process.env.VERCEL;
-const dbPath = isVercel 
-  ? path.join('/tmp', 'database.db') 
-  : path.resolve(__dirname, '..', 'database.db');
+const dbDir = isVercel ? '/tmp' : path.resolve(__dirname, '..');
 
-// Database Connection
-const db = new sqlite3.Database(dbPath, (err) => {
-  if (err) {
-    console.error('Error opening SQLite database:', err.message);
-  } else {
-    console.log(`Connected to local SQLite database at: ${dbPath}`);
-    initializeTables();
+const paths = {
+  users: path.join(dbDir, 'users_table.json'),
+  login_counts: path.join(dbDir, 'login_counts_table.json'),
+  activity_logs: path.join(dbDir, 'activity_logs_table.json')
+};
+
+// Helper to read/write JSON tables (Mimicking Relational Database Tables)
+function readTable(tableName) {
+  try {
+    if (!fs.existsSync(paths[tableName])) {
+      return [];
+    }
+    const data = fs.readFileSync(paths[tableName], 'utf8');
+    return JSON.parse(data || '[]');
+  } catch (e) {
+    console.error(`Error reading table ${tableName}:`, e);
+    return [];
   }
-});
-
-// Initialize DB tables
-function initializeTables() {
-  db.serialize(() => {
-    // 1. Users Table
-    db.run(`
-      CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        email TEXT UNIQUE NOT NULL,
-        password TEXT NOT NULL,
-        joined TEXT NOT NULL
-      )
-    `);
-
-    // 2. Login Counts Table
-    db.run(`
-      CREATE TABLE IF NOT EXISTS login_counts (
-        email TEXT PRIMARY KEY,
-        count INTEGER DEFAULT 0
-      )
-    `);
-
-    // 3. Activity Logs Table
-    db.run(`
-      CREATE TABLE IF NOT EXISTS activity_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        email TEXT NOT NULL,
-        action TEXT NOT NULL,
-        status TEXT NOT NULL,
-        ip TEXT NOT NULL,
-        timestamp TEXT NOT NULL
-      )
-    `);
-    
-    // Seed default admin user if database is empty
-    db.get("SELECT COUNT(*) as count FROM users", (err, row) => {
-      if (row && row.count === 0) {
-        bcrypt.hash('Password123!', 10, (err, hash) => {
-          if (!err) {
-            db.run(
-              "INSERT INTO users (name, email, password, joined) VALUES (?, ?, ?, ?)",
-              ["Nexus Admin", "admin@nexus.io", hash, new Date().toISOString()],
-              (err) => {
-                if (!err) {
-                  console.log("Seeded database with default user 'admin@nexus.io' (password: Password123!)");
-                }
-              }
-            );
-          }
-        });
-      }
-    });
-
-    console.log('Database tables verified/initialized.');
-  });
 }
+
+function writeTable(tableName, data) {
+  try {
+    fs.writeFileSync(paths[tableName], JSON.stringify(data, null, 2), 'utf8');
+  } catch (e) {
+    console.error(`Error writing table ${tableName}:`, e);
+  }
+}
+
+// Initialize and Seed Database
+function initializeDatabase() {
+  if (!fs.existsSync(dbDir)) {
+    fs.mkdirSync(dbDir, { recursive: true });
+  }
+
+  const users = readTable('users');
+  if (users.length === 0) {
+    const adminPasswordHash = bcrypt.hashSync('Password123!', 10);
+    const adminUser = {
+      id: 1,
+      name: "Nexus Admin",
+      email: "admin@nexus.io",
+      password: adminPasswordHash,
+      joined: new Date().toISOString()
+    };
+    users.push(adminUser);
+    writeTable('users', users);
+    console.log("Seeded database with default user 'admin@nexus.io' (password: Password123!)");
+  }
+  console.log("JSON Database Tables verified & initialized.");
+}
+
+initializeDatabase();
+
+// Mimicked DB Queries wrapper
+const db = {
+  get: (query, params, callback) => {
+    try {
+      if (query.includes("FROM users")) {
+        const users = readTable('users');
+        const email = params[0].toLowerCase();
+        const user = users.find(u => u.email.toLowerCase() === email);
+        callback(null, user);
+      } else if (query.includes("FROM login_counts")) {
+        const counts = readTable('login_counts');
+        const email = params[0].toLowerCase();
+        const row = counts.find(c => c.email.toLowerCase() === email);
+        callback(null, row);
+      } else {
+        callback(new Error("Unknown query: " + query));
+      }
+    } catch (e) {
+      callback(e);
+    }
+  },
+
+  run: (query, params, callback) => {
+    try {
+      if (query.includes("INSERT INTO users")) {
+        const users = readTable('users');
+        const [name, email, password, joined] = params;
+        const newUser = { id: users.length + 1, name, email, password, joined };
+        users.push(newUser);
+        writeTable('users', users);
+        if (callback) callback(null);
+      } else if (query.includes("login_counts")) {
+        const counts = readTable('login_counts');
+        const email = params[0];
+        const index = counts.findIndex(c => c.email.toLowerCase() === email.toLowerCase());
+        if (index > -1) {
+          counts[index].count += 1;
+        } else {
+          counts.push({ email, count: 1 });
+        }
+        writeTable('login_counts', counts);
+        if (callback) callback(null);
+      } else if (query.includes("INSERT INTO activity_logs")) {
+        const logs = readTable('activity_logs');
+        const [email, action, status, ip, timestamp] = params;
+        const newLog = { id: logs.length + 1, email, action, status, ip, timestamp };
+        logs.push(newLog);
+        writeTable('activity_logs', logs);
+        if (callback) callback(null);
+      } else {
+        if (callback) callback(new Error("Unknown run query: " + query));
+      }
+    } catch (e) {
+      if (callback) callback(e);
+    }
+  },
+
+  all: (query, params, callback) => {
+    try {
+      if (query.includes("FROM activity_logs")) {
+        const logs = readTable('activity_logs');
+        const email = params[0].toLowerCase();
+        const filtered = logs
+          .filter(l => l.email.toLowerCase() === email)
+          .sort((a, b) => b.id - a.id)
+          .slice(0, 50);
+        callback(null, filtered);
+      } else {
+        callback(new Error("Unknown all query: " + query));
+      }
+    } catch (e) {
+      callback(e);
+    }
+  }
+};
 
 // ==========================================================================
 // Authentication Endpoints
@@ -240,7 +300,7 @@ app.post('/api/dashboard/log', (req, res) => {
         return res.status(500).json({ error: 'Failed to write activity log.' });
       }
 
-      return res.status(201).json({ success: true, logId: this.lastID });
+      return res.status(201).json({ success: true });
     }
   );
 });
