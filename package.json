@@ -5,7 +5,7 @@
   "main": "index.html",
   "scripts": {
     "client": "vite",
-    "server": "node server.js",
+    "server": "node api/server.js",
     "dev": "concurrently \"npm run server\" \"npm run client\"",
     "build": "vite build",
     "preview": "vite preview"

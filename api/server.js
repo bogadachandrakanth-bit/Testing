@@ -9,13 +9,18 @@ const PORT = 3000;
 // Middleware
 app.use(express.json());
 
-// Database Initialization
-const dbPath = path.resolve(__dirname, 'database.db');
+// Database Path Configuration (Use writable /tmp folder on Vercel)
+const isVercel = process.env.VERCEL;
+const dbPath = isVercel 
+  ? path.join('/tmp', 'database.db') 
+  : path.resolve(__dirname, '..', 'database.db');
+
+// Database Connection
 const db = new sqlite3.Database(dbPath, (err) => {
   if (err) {
     console.error('Error opening SQLite database:', err.message);
   } else {
-    console.log('Connected to local SQLite database at:', dbPath);
+    console.log(`Connected to local SQLite database at: ${dbPath}`);
     initializeTables();
   }
 });
@@ -240,7 +245,11 @@ app.post('/api/dashboard/log', (req, res) => {
   );
 });
 
-// Start listening
-app.listen(PORT, () => {
-  console.log(`NexusGate backend server listening on http://localhost:${PORT}`);
-});
+// Start listening (only when NOT running as serverless function on Vercel)
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`NexusGate backend server listening on http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;
