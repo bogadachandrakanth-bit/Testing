@@ -1,6 +1,6 @@
 /**
  * NexusGate Login Platform Engine
- * Manages Auth flows, Validations, State Transitions, LocalDB, 2FA, Toasts and Dashboard
+ * Refactored to connect to Express backend + SQLite relational database tables
  */
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -12,23 +12,6 @@ document.addEventListener("DOMContentLoaded", () => {
   let sessionTimerInterval = null;
   let sessionSecondsElapsed = 0;
   let apiOperationsCount = 0;
-  let loginCounts = JSON.parse(localStorage.getItem("nexus_login_counts") || "{}");
-
-  // Mock Database in LocalStorage
-  const getLocalUsers = () => JSON.parse(localStorage.getItem("nexus_users") || "[]");
-  const saveLocalUsers = (users) => localStorage.setItem("nexus_users", JSON.stringify(users));
-
-  // Initialize with some default users if database is empty
-  if (getLocalUsers().length === 0) {
-    saveLocalUsers([
-      {
-        name: "Nexus Admin",
-        email: "admin@nexus.io",
-        password: "Password123!", // strong password
-        joined: new Date().toISOString()
-      }
-    ]);
-  }
 
   // ==========================================================================
   // DOM Elements Selection
@@ -397,11 +380,11 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   // ==========================================================================
-  // Form Submission Transitions & Local DB Logics
+  // Form Submission Transitions & Backend Connections
   // ==========================================================================
 
-  // Signup form submit
-  forms.signup.addEventListener("submit", (e) => {
+  // Signup form submit -> CONNECT TO BACKEND
+  forms.signup.addEventListener("submit", async (e) => {
     e.preventDefault();
     clearErrorsInCard(cards.signup);
 
@@ -442,44 +425,51 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
-    // Check if user already exists
-    const users = getLocalUsers();
-    if (users.find(u => u.email.toLowerCase() === emailVal.toLowerCase())) {
-      validators.showInputError(signupFields.email, signupErrors.email, "Email is already registered");
+    try {
+      // Send POST request to backend API
+      const res = await fetch('/api/auth/signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: nameVal,
+          email: emailVal,
+          password: pwdVal
+        })
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        if (data.error && data.error.includes("already registered")) {
+          validators.showInputError(signupFields.email, signupErrors.email, data.error);
+        }
+        throw new Error(data.error || "Failed to register account.");
+      }
+
+      showToast("Registration Successful", "Account created! Redirecting to login.", "success");
+      forms.signup.reset();
+      
+      // Reset strength indicators
+      strengthBar.className = "strength-bar";
+      strengthLabel.textContent = "Password Strength: None";
+      Object.values(rules).forEach(rule => {
+        rule.className = "invalid";
+        rule.querySelector("i").setAttribute("data-lucide", "x");
+      });
+      lucide.createIcons();
+
+      setTimeout(() => {
+        switchCard("login");
+      }, 1500);
+
+    } catch (err) {
       triggerFormShake(cards.signup);
-      showToast("Registration Failed", "This email account is already registered.", "error");
-      return;
+      showToast("Registration Failed", err.message, "error");
     }
-
-    // Save user
-    const newUser = {
-      name: nameVal,
-      email: emailVal,
-      password: pwdVal,
-      joined: new Date().toISOString()
-    };
-    users.push(newUser);
-    saveLocalUsers(users);
-
-    showToast("Registration Successful", "Account created! Redirecting you to login.", "success");
-    forms.signup.reset();
-    
-    // Reset strength indicators
-    strengthBar.className = "strength-bar";
-    strengthLabel.textContent = "Password Strength: None";
-    Object.values(rules).forEach(rule => {
-      rule.className = "invalid";
-      rule.querySelector("i").setAttribute("data-lucide", "x");
-    });
-    lucide.createIcons();
-
-    setTimeout(() => {
-      switchCard("login");
-    }, 1500);
   });
 
-  // Login form submit
-  forms.login.addEventListener("submit", (e) => {
+  // Login form submit -> CONNECT TO BACKEND
+  forms.login.addEventListener("submit", async (e) => {
     e.preventDefault();
     clearErrorsInCard(cards.login);
 
@@ -503,20 +493,32 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
-    // Validate email + password match in LocalStorage DB
-    const users = getLocalUsers();
-    const matchedUser = users.find(u => u.email.toLowerCase() === emailVal.toLowerCase() && u.password === pwdVal);
+    try {
+      // Send POST request to backend API
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: emailVal,
+          password: pwdVal
+        })
+      });
 
-    if (!matchedUser) {
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || "Login authentication failed.");
+      }
+
+      // Store in temporary session state and transition to 2FA verification
+      currentUser = data.user;
+      start2FAFlow();
+
+    } catch (err) {
       triggerFormShake(cards.login);
-      validators.showInputError(loginFields.password, loginErrors.password, "Incorrect email or password");
-      showToast("Access Denied", "Invalid login credentials provided.", "error");
-      return;
+      validators.showInputError(loginFields.password, loginErrors.password, err.message);
+      showToast("Access Denied", err.message, "error");
     }
-
-    // Trigger 2FA step verification
-    currentUser = matchedUser;
-    start2FAFlow();
   });
 
   // Forgot password form submit
@@ -532,11 +534,7 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
-    // Check if email exists
-    const users = getLocalUsers();
-    const userExists = users.some(u => u.email.toLowerCase() === emailVal.toLowerCase());
-
-    showToast("Reset Link Sent", "If the email is registered, a recovery link will arrive shortly.", "success");
+    showToast("Reset Link Sent", "If the email exists in our records, a recovery link will arrive shortly.", "success");
     forms.forgot.reset();
 
     setTimeout(() => {
@@ -607,7 +605,7 @@ document.addEventListener("DOMContentLoaded", () => {
     verify2FACode();
   });
 
-  function verify2FACode() {
+  async function verify2FACode() {
     const enteredCode = otpInputs.map(input => input.value).join("");
     
     if (enteredCode.length < 6) {
@@ -627,8 +625,25 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
-    // Successfully verified! Redirect to dashboard
+    // Successfully verified! Write a DB activity log on the server and transition to dashboard
     showToast("Auth Verified", "Secure access granted. Preparing dashboard.", "success");
+    
+    try {
+      // Create session activity log in database
+      const randomIp = `192.168.12.${Math.floor(100 + Math.random() * 899)}`;
+      await fetch('/api/dashboard/log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: currentUser.email,
+          action: 'Secure Authentication (2FA)',
+          status: 'Success',
+          ip: randomIp
+        })
+      });
+    } catch (e) {
+      console.error("Failed to write initial login log:", e);
+    }
     
     setTimeout(() => {
       initializeDashboard();
@@ -636,10 +651,10 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   // ==========================================================================
-  // Post-Login Interactive Dashboard Controller
+  // Post-Login Dashboard Controller (LOAD FROM BACKEND DATABASE TABLES)
   // ==========================================================================
 
-  function initializeDashboard() {
+  async function initializeDashboard() {
     if (!currentUser) return;
 
     // Toggle View
@@ -650,19 +665,23 @@ document.addEventListener("DOMContentLoaded", () => {
     db.email.textContent = currentUser.email;
     db.avatar.textContent = currentUser.name.charAt(0).toUpperCase();
 
-    // Increment login counter
-    const userEmailKey = currentUser.email.toLowerCase();
-    loginCounts[userEmailKey] = (loginCounts[userEmailKey] || 0) + 1;
-    localStorage.setItem("nexus_login_counts", JSON.stringify(loginCounts));
-    db.loginCount.textContent = loginCounts[userEmailKey];
-
-    // Reset Dashboard Stats
+    // Reset Dashboard Stats counters
     apiOperationsCount = 0;
     db.apiCount.textContent = apiOperationsCount;
-    db.activityLog.innerHTML = ""; // Clear logs
 
-    // Log the successful login action
-    addActivityLog("Secure Authentication (2FA)", "Success", "success");
+    // Load actual login counts and recent logs from database tables
+    try {
+      const res = await fetch(`/api/dashboard/stats?email=${encodeURIComponent(currentUser.email)}`);
+      const data = await res.json();
+      
+      if (res.ok) {
+        db.loginCount.textContent = data.loginCount || 1;
+        renderActivityLogs(data.logs || []);
+      }
+    } catch (err) {
+      console.error("Failed to load dashboard metrics from backend tables:", err);
+      showToast("Server Connection Issue", "Could not fetch session activity logs.", "warning");
+    }
 
     // Start Session duration active timer
     sessionSecondsElapsed = 0;
@@ -677,32 +696,79 @@ document.addEventListener("DOMContentLoaded", () => {
     }, 1000);
   }
 
-  function addActivityLog(action, result, statusClass) {
-    const row = document.createElement("tr");
+  // Render logs rows inside the table
+  function renderActivityLogs(logs) {
+    db.activityLog.innerHTML = "";
     
-    const now = new Date();
-    const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    
-    // Simulate dynamic remote server IP
-    const randomIp = `192.168.12.${Math.floor(100 + Math.random() * 899)}`;
+    logs.forEach(log => {
+      const row = document.createElement("tr");
+      
+      // format server ISO timestamp into local time
+      let timeStr = "";
+      try {
+        const dateObj = new Date(log.timestamp);
+        timeStr = dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      } catch (e) {
+        timeStr = log.timestamp;
+      }
+      
+      const statusClass = log.status.toLowerCase().includes("success") || log.status === "200 OK" ? "success" : "error";
 
-    row.innerHTML = `
-      <td>${timeStr}</td>
-      <td><strong>${action}</strong></td>
-      <td><span class="log-status ${statusClass}">${result}</span></td>
-      <td><code>${randomIp}</code></td>
-    `;
-    
-    // Insert at top of logs table
-    db.activityLog.insertBefore(row, db.activityLog.firstChild);
+      row.innerHTML = `
+        <td>${timeStr}</td>
+        <td><strong>${log.action}</strong></td>
+        <td><span class="log-status ${statusClass}">${log.status}</span></td>
+        <td><code>${log.ip}</code></td>
+      `;
+      
+      db.activityLog.appendChild(row);
+    });
   }
 
-  // Dashboard API Simulated actions
+  // Helper: Write log on backend and prepend it to UI table
+  async function addActivityLog(action, statusResult) {
+    const randomIp = `192.168.12.${Math.floor(100 + Math.random() * 899)}`;
+    const statusClass = statusResult.toLowerCase().includes("success") || statusResult === "200 OK" ? "success" : "error";
+    
+    try {
+      // POST to backend to save in activity_logs table
+      const res = await fetch('/api/dashboard/log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: currentUser.email,
+          action,
+          status: statusResult,
+          ip: randomIp
+        })
+      });
+      
+      if (res.ok) {
+        const now = new Date();
+        const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        
+        const row = document.createElement("tr");
+        row.innerHTML = `
+          <td>${timeStr}</td>
+          <td><strong>${action}</strong></td>
+          <td><span class="log-status ${statusClass}">${statusResult}</span></td>
+          <td><code>${randomIp}</code></td>
+        `;
+        
+        // Prepend to display
+        db.activityLog.insertBefore(row, db.activityLog.firstChild);
+      }
+    } catch (e) {
+      console.error("Failed to push log record to database table:", e);
+    }
+  }
+
+  // Dashboard API Simulated actions (Connect to backend table insertion)
   db.apiSuccessBtn.addEventListener("click", () => {
     apiOperationsCount++;
     db.apiCount.textContent = apiOperationsCount;
     
-    addActivityLog("GET /api/v1/profile", "200 OK", "success");
+    addActivityLog("GET /api/v1/profile", "200 OK");
     showToast("API Fetch Completed", "Secure profile attributes downloaded successfully.", "success");
   });
 
@@ -710,7 +776,7 @@ document.addEventListener("DOMContentLoaded", () => {
     apiOperationsCount++;
     db.apiCount.textContent = apiOperationsCount;
 
-    addActivityLog("POST /api/v1/secure-action", "429 Too Many Requests", "error");
+    addActivityLog("POST /api/v1/secure-action", "429 Too Many Requests");
     showToast("API Access Error", "HTTP 429: Rate-limit ceiling crossed.", "error");
   });
 

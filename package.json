@@ -4,11 +4,19 @@
   "description": "Next-generation dynamic login and user onboarding platform",
   "main": "index.html",
   "scripts": {
-    "dev": "vite",
+    "client": "vite",
+    "server": "node server.js",
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
     "build": "vite build",
     "preview": "vite preview"
   },
   "devDependencies": {
     "vite": "^5.2.0"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "concurrently": "^10.0.3",
+    "express": "^5.2.1",
+    "sqlite3": "^6.0.1"
   }
 }
